@@ -1,7 +1,7 @@
 """
-Stock Analysis Backend Server
-Fetches real market data from Yahoo Finance and serves it via REST API
-No CORS issues - runs locally on your machine
+Stock Analysis Backend Server - IMPROVED VERSION
+Fetches real market data from Yahoo Finance with rate limiting and retries
+Optimized for Railway deployment
 """
 
 from flask import Flask, jsonify, request
@@ -10,6 +10,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
+import time
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -103,18 +104,39 @@ def calculate_variance(prices, period=504):
     variance = np.std(returns) * np.sqrt(252) * 100
     return round(variance, 2)
 
+def fetch_stock_data_with_retry(ticker, max_retries=3):
+    """Fetch stock data with retry logic and delays"""
+    for attempt in range(max_retries):
+        try:
+            # Add delay to avoid rate limiting
+            if attempt > 0:
+                time.sleep(2 * attempt)  # Exponential backoff
+            
+            stock = yf.Ticker(ticker)
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=730)
+            
+            # Try with timeout
+            df = stock.history(start=start_date, end=end_date, timeout=10)
+            
+            if not df.empty and len(df) >= 200:
+                return df
+                
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed for {ticker}: {str(e)}")
+            if attempt == max_retries - 1:
+                return None
+            continue
+    
+    return None
+
 @app.route('/api/stock/<ticker>', methods=['GET'])
 def get_stock_data(ticker):
     """Fetch stock data and calculate all indicators"""
     try:
-        # Fetch 2 years of data
-        stock = yf.Ticker(ticker)
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=730)
+        df = fetch_stock_data_with_retry(ticker)
         
-        df = stock.history(start=start_date, end=end_date)
-        
-        if df.empty or len(df) < 200:
+        if df is None or len(df) < 200:
             return jsonify({'error': 'Insufficient data', 'ticker': ticker}), 404
         
         # Calculate indicators
@@ -152,7 +174,7 @@ def get_stock_data(ticker):
 
 @app.route('/api/scan', methods=['POST'])
 def scan_stocks():
-    """Scan multiple stocks at once"""
+    """Scan multiple stocks at once with rate limiting"""
     try:
         data = request.json
         tickers = data.get('tickers', [])
@@ -162,15 +184,16 @@ def scan_stocks():
         
         results = []
         
-        for ticker in tickers:
+        for idx, ticker in enumerate(tickers):
             try:
-                stock = yf.Ticker(ticker)
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=730)
+                # Add delay every stock to avoid overwhelming Yahoo Finance
+                if idx > 0:
+                    time.sleep(0.5)  # 500ms delay between requests
                 
-                df = stock.history(start=start_date, end=end_date)
+                df = fetch_stock_data_with_retry(ticker)
                 
-                if df.empty or len(df) < 200:
+                if df is None or len(df) < 200:
+                    print(f"Skipping {ticker} - insufficient data")
                     continue
                 
                 closes = df['Close'].values
@@ -201,6 +224,7 @@ def scan_stocks():
                 }
                 
                 results.append(result)
+                print(f"✓ Successfully processed {ticker} ({len(results)}/{len(tickers)})")
                 
             except Exception as e:
                 print(f"Error processing {ticker}: {str(e)}")
@@ -221,15 +245,17 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     
     print("=" * 60)
-    print("STOCK ANALYSIS BACKEND SERVER")
+    print("STOCK ANALYSIS BACKEND SERVER - IMPROVED VERSION")
     print("=" * 60)
     print(f"Server starting on port {port}")
+    print("\nFeatures:")
+    print("  ✓ Rate limiting (500ms delay between requests)")
+    print("  ✓ Automatic retries with exponential backoff")
+    print("  ✓ Better error handling")
     print("\nAvailable endpoints:")
     print("  - GET  /api/health          - Check if server is running")
     print("  - GET  /api/stock/<ticker>  - Get data for single stock")
     print("  - POST /api/scan            - Scan multiple stocks")
-    print("\nMake sure to install dependencies first:")
-    print("  pip install flask flask-cors yfinance pandas numpy")
     print("=" * 60)
     
     # Use production settings if PORT env var exists (deployed)
